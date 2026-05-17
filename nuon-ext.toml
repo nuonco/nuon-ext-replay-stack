@@ -1,0 +1,8 @@
+[extension]
+name = "replay-stack"
+description = "Replay the most recent install_stack phone-home payload against the current stack version (use after a reprovision when the original phone-home was missed)"
+
+[extension.auth]
+requires_token = true
+requires_org = true
+requires_install = true

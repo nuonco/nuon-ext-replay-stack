@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+#
+# nuon-ext-replay-stack
+#
+# Replay the most recent install_stack phone-home payload for an install
+# against the current stack version's phone_home_url. Use after manually
+# triggering a reprovision in the dashboard when the original phone-home was
+# missed.
+#
+# Auth + context are injected by the nuon CLI host:
+#   NUON_API_URL, NUON_API_TOKEN, NUON_ORG_ID, NUON_INSTALL_ID
+#
+# Usage:
+#   nuon replay-stack [install_id]
+#
+# If install_id is omitted, falls back to $NUON_INSTALL_ID from the CLI's
+# selected context.
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+nuon replay-stack — replay a missed install_stack phone-home
+
+Recovers an install that's stuck after a phone-home was received by the API
+but never flipped its install_stack_versions row to active. Run this AFTER
+triggering a fresh reprovision in the dashboard: the new stack version
+created by reprovision will be awaiting its first phone-home, and this
+extension POSTs the previous run's payload to it.
+
+USAGE
+  nuon replay-stack [install_id]
+
+ARGUMENTS
+  install_id   Install to recover. Defaults to $NUON_INSTALL_ID from your
+               current CLI context (set via `nuon installs select`).
+
+FLAGS
+  -y, --yes    Skip the confirmation prompt (required when stdin is not a tty).
+  -h, --help   Show this help.
+
+REQUIRES
+  - `nuon login` (token + org)
+  - A selected install, or an install_id argument
+  - A reprovision already in progress / completed for that install
+
+EXAMPLES
+  nuon replay-stack
+  nuon replay-stack inlgosqg7mm06vukjlidehih49
+EOF
+}
+
+assume_yes=0
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    -y|--yes)
+      assume_yes=1
+      ;;
+    *)
+      args+=("$arg")
+      ;;
+  esac
+done
+
+if [[ ${#args[@]} -eq 0 && -z "${NUON_INSTALL_ID:-}" ]]; then
+  usage
+  exit 1
+fi
+
+install_id="${args[0]:-${NUON_INSTALL_ID:-}}"
+if [[ -z "$install_id" ]]; then
+  usage
+  exit 1
+fi
+
+: "${NUON_API_URL:?NUON_API_URL not set (CLI should inject this)}"
+: "${NUON_API_TOKEN:?NUON_API_TOKEN not set (run 'nuon login')}"
+: "${NUON_ORG_ID:?NUON_ORG_ID not set (run 'nuon orgs select')}"
+
+curl_api() {
+  curl -fsS \
+    -H "Authorization: Bearer $NUON_API_TOKEN" \
+    -H "X-Nuon-Org-ID: $NUON_ORG_ID" \
+    "$@"
+}
+
+echo "[replay-stack] fetching install stack for $install_id"
+stack=$(curl_api "$NUON_API_URL/v1/installs/$install_id/stack")
+
+# Newest stack version awaiting its first phone home: has phone_home_url and
+# no runs yet. That is precisely the state a fresh reprovision leaves the new
+# stack version in.
+target=$(echo "$stack" | jq -e '
+  .install_stack_versions
+  | map(select((.phone_home_url // "") != "" and ((.runs // []) | length) == 0))
+  | sort_by(.created_at) | reverse | .[0]
+' 2>/dev/null) || {
+  echo "[replay-stack] error: no stack version awaiting phone home (did you reprovision?)" >&2
+  exit 1
+}
+
+phone_home_url=$(echo "$target" | jq -r '.phone_home_url')
+target_sv_id=$(echo "$target" | jq -r '.id')
+
+# Most recent run across all preloaded stack versions. The new SV has no runs
+# (that's how we picked it), so this picks the prior SV's latest run — the
+# missed payload.
+payload=$(echo "$stack" | jq -e '
+  [ .install_stack_versions[]?.runs[]? ]
+  | sort_by(.created_at) | reverse | .[0].data
+' 2>/dev/null) || {
+  echo "[replay-stack] error: no prior run payload found for install" >&2
+  exit 1
+}
+
+payload=$(echo "$payload" | jq '. + {request_type: "Create"}')
+
+echo
+echo "── target stack version ────────────────────────────────────"
+echo "$target" | jq .
+echo
+echo "── payload to POST ─────────────────────────────────────────"
+echo "$payload" | jq .
+echo
+echo "── target URL ──────────────────────────────────────────────"
+echo "$phone_home_url"
+echo
+
+if [[ $assume_yes -ne 1 ]]; then
+  if [[ ! -t 0 ]]; then
+    echo "[replay-stack] error: refusing to POST without confirmation in non-interactive mode; pass --yes" >&2
+    exit 1
+  fi
+  read -r -p "POST this payload to the URL above? [y/N] " reply
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *)
+      echo "[replay-stack] aborted"
+      exit 1
+      ;;
+  esac
+fi
+
+echo "[replay-stack] POSTing to $phone_home_url"
+
+resp_file=$(mktemp)
+http_code=$(curl -sS -o "$resp_file" -w "%{http_code}" \
+  -X POST "$phone_home_url" \
+  -H "Content-Type: application/json" \
+  --data "$payload")
+
+echo "[replay-stack] HTTP $http_code"
+echo "[replay-stack] response:"
+cat "$resp_file"
+echo
+rm -f "$resp_file"
+
+if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+  exit 1
+fi

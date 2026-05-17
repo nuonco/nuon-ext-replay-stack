@@ -1,0 +1,18 @@
+{
+  "name": "replay-stack",
+  "description": "Replay the most recent install_stack phone-home payload against the current stack version (use after a reprovision when the original phone-home was missed)",
+  "repo": "local:/Users/jordanacosta/projects/github.com/nuonco/nuon-ext-replay-stack",
+  "version": "dev",
+  "tag": "dev",
+  "installed_at": "2026-05-17T17:28:21Z",
+  "updated_at": "2026-05-17T17:28:21Z",
+  "binary": "",
+  "type": "script",
+  "entrypoint": "nuon-ext-replay-stack",
+  "platform": "darwin/arm64",
+  "min_cli_version": "",
+  "requires_token": true,
+  "requires_org": true,
+  "requires_app": false,
+  "requires_install": true
+}
